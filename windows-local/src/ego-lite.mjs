@@ -30,6 +30,7 @@ import {
   skillTargets,
   uninstallSkill,
 } from "./skill-install.mjs";
+import { resolveScope, stripScopeFlags } from "./scope.mjs";
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const REPO_ROOT = resolve(HERE, "..", "..");
@@ -567,82 +568,6 @@ function uninstall(scope) {
 }
 
 // --------------------------------------------------------------- helpers
-
-/**
- * Where this invocation installs to and keeps state.
- *
- * user scope    — PATH command, skills in the home directory, one shared
- *                 browser profile: convenient, but global.
- * project scope — everything under <dir>/.ego, including its own browser
- *                 profile and CDP port, so two projects never share cookies,
- *                 task spaces, or a browser window.
- */
-function resolveScope(args) {
-  const index = args.findIndex((arg) => arg === "--project");
-  if (index < 0) {
-    const stateDir =
-      process.env.EGO_HOST_STATE_DIR ||
-      join(
-        process.env.LOCALAPPDATA || join(homedir(), ".local", "share"),
-        "ego-windows-host",
-      );
-    return {
-      mode: "user",
-      label: "user-wide",
-      stateDir,
-      userDataDir: join(stateDir, "profile"),
-      port: Number(process.env.EGO_HOST_DEBUG_PORT) || 9522,
-      shimDir: join(homedir(), ".local", "bin"),
-      skillBase: homedir(),
-      onlyExistingAgents: true,
-      mutatesPath: true,
-    };
-  }
-  const candidate = args[index + 1];
-  const projectDir = resolve(
-    candidate && !candidate.startsWith("--") ? candidate : process.cwd(),
-  );
-  const egoDir = join(projectDir, ".ego");
-  const stateDir = join(egoDir, "state");
-  return {
-    mode: "project",
-    label: `project ${projectDir}`,
-    projectDir,
-    egoDir,
-    stateDir,
-    userDataDir: join(stateDir, "profile"),
-    // Derived from the path so the same folder always gets the same port, and
-    // two different folders almost never collide.
-    port: projectPort(projectDir),
-    shimDir: join(egoDir, "bin"),
-    skillBase: projectDir,
-    onlyExistingAgents: false,
-    mutatesPath: false,
-  };
-}
-
-// Stable per-folder port in the 9530-9999 range (9522 stays the user-wide one).
-function projectPort(projectDir) {
-  const key = projectDir.toLowerCase();
-  let hash = 0;
-  for (let i = 0; i < key.length; i += 1) {
-    hash = (hash * 31 + key.charCodeAt(i)) % 470;
-  }
-  return 9530 + hash;
-}
-
-function stripScopeFlags(args) {
-  const out = [];
-  for (let i = 0; i < args.length; i += 1) {
-    if (args[i] === "--project") {
-      const next = args[i + 1];
-      if (next && !next.startsWith("--")) i += 1;
-      continue;
-    }
-    out.push(args[i]);
-  }
-  return out;
-}
 
 function hostRun(args, stdio = "pipe", scope = null) {
   const result = spawnSync(process.execPath, [HOST_ENTRY, ...args], {

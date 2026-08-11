@@ -116,3 +116,58 @@ test("ensureBrowser reports a launch that never becomes ready", async () => {
     await rm(dir, { recursive: true, force: true });
   }
 });
+
+test("a failed launch names the port and prints a reproducible command", async () => {
+  const dir = await mkdtemp(join(tmpdir(), "ego-host-launch-"));
+  try {
+    await assert.rejects(
+      ensureBrowser({
+        port: 9700,
+        userDataDir: join(dir, "profile"),
+        browserPath: () => "C:\\fake\\msedge.exe",
+        spawnFn: fakeSpawn({}),
+        fetchFn: fetchDead(),
+        sleep: async () => {},
+        timeoutMs: 50,
+        exists: () => false,
+      }),
+      (error) => {
+        assert.match(
+          error.message,
+          /another process may already hold port 9700/,
+        );
+        assert.match(error.message, /Run this by hand/);
+        // The command has to be complete enough to paste into a shell.
+        assert.match(error.message, /--remote-debugging-port=9700/);
+        assert.match(error.message, /C:\\fake\\msedge\.exe/);
+        return true;
+      },
+    );
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test("a locked profile is called out as the likely cause", async () => {
+  const dir = await mkdtemp(join(tmpdir(), "ego-host-launch-"));
+  try {
+    const userDataDir = join(dir, "profile");
+    await assert.rejects(
+      ensureBrowser({
+        port: 9522,
+        userDataDir,
+        browserPath: () => "C:\\fake\\msedge.exe",
+        spawnFn: fakeSpawn({}),
+        fetchFn: fetchDead(),
+        sleep: async () => {},
+        timeoutMs: 50,
+        // Chromium leaves this behind while a process holds the profile; the
+        // second launch then forwards its command line and exits silently.
+        exists: (path) => path === join(userDataDir, "lockfile"),
+      }),
+      /looks locked by another browser process/,
+    );
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
