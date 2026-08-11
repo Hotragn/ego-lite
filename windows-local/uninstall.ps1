@@ -7,7 +7,12 @@
 # profile, including any imported logins). This checkout is left untouched.
 
 [CmdletBinding()]
-param([switch]$Force)
+param(
+    # Remove a project-scoped install (its .ego directory and skill) instead of
+    # the user-wide one.
+    [string]$Project,
+    [switch]$Force
+)
 
 $ErrorActionPreference = 'Stop'
 $here = Split-Path -Parent $MyInvocation.MyCommand.Path
@@ -23,6 +28,16 @@ if (-not $Force) {
     }
 }
 
-node $cli uninstall
+$scopeArgs = @()
+if ($Project) {
+    $scopeArgs = @('--project', (Resolve-Path $Project).Path)
+}
+
+node $cli uninstall @scopeArgs
 Write-Host ''
-Write-Host 'Uninstalled. Delete the windows-local directory to remove the rest.' -ForegroundColor Green
+if ($Project) {
+    Write-Host 'Project install removed.' -ForegroundColor Green
+}
+else {
+    Write-Host 'Uninstalled. Delete the windows-local directory to remove the rest.' -ForegroundColor Green
+}

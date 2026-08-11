@@ -10,17 +10,20 @@ import { cpSync, existsSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
 
-// Agent CLIs that read skills from a per-user directory.
+// Agent CLIs read skills from <base>/.claude/skills and <base>/.codex/skills.
+// The base is the home directory for a user-wide install, or a project
+// directory for a scoped one — agents pick up project-level skills when they
+// run inside that project.
 const AGENT_SKILL_DIRS = [
-  { agent: "Claude Code", dir: (home) => join(home, ".claude", "skills") },
-  { agent: "Codex", dir: (home) => join(home, ".codex", "skills") },
+  { agent: "Claude Code", dir: (base) => join(base, ".claude", "skills") },
+  { agent: "Codex", dir: (base) => join(base, ".codex", "skills") },
 ];
 
-export function skillTargets(home = homedir()) {
+export function skillTargets(base = homedir()) {
   return AGENT_SKILL_DIRS.map(({ agent, dir }) => ({
     agent,
-    root: dir(home),
-    path: join(dir(home), "ego-browser"),
+    root: dir(base),
+    path: join(dir(base), "ego-browser"),
   }));
 }
 
@@ -35,14 +38,17 @@ export function skillTargets(home = homedir()) {
 export function installSkill({
   skillSource,
   hostCommand,
-  home = homedir(),
+  base = homedir(),
+  // A user-wide install only writes where an agent already keeps its skills; a
+  // project-scoped install creates the directories, since a fresh project has
+  // none yet.
   onlyExistingAgents = true,
 }) {
   if (!existsSync(skillSource)) {
     throw new Error(`skill source not found: ${skillSource}`);
   }
   const results = [];
-  for (const target of skillTargets(home)) {
+  for (const target of skillTargets(base)) {
     const agentRootExists = existsSync(target.root);
     if (onlyExistingAgents && !agentRootExists) {
       results.push({ ...target, status: "skipped (agent not installed)" });
@@ -61,9 +67,9 @@ export function installSkill({
   return results;
 }
 
-export function uninstallSkill(home = homedir()) {
+export function uninstallSkill(base = homedir()) {
   const results = [];
-  for (const target of skillTargets(home)) {
+  for (const target of skillTargets(base)) {
     const existed = existsSync(target.path);
     rmSync(target.path, { recursive: true, force: true });
     results.push({ ...target, status: existed ? "removed" : "not present" });

@@ -8,6 +8,10 @@
 
 [CmdletBinding()]
 param(
+    # Install into one folder only. Everything (browser profile, task spaces,
+    # CDP port, agent skill) lives in <dir>\.ego; your PATH and other projects
+    # are untouched. Pass the folder, or use -Project '.' for the current one.
+    [string]$Project,
     # Skip the npm build steps (use when only re-installing the command/skill).
     [switch]$NoBuild,
     # Import this browser's profile right after setup: edge or chrome.
@@ -24,7 +28,12 @@ if (-not (Get-Command node -ErrorAction SilentlyContinue)) {
     Write-Error 'Node.js 22 or newer is required and was not found on PATH.'
 }
 
-$setupArgs = @('setup')
+$scopeArgs = @()
+if ($Project) {
+    $scopeArgs = @('--project', (Resolve-Path $Project).Path)
+}
+
+$setupArgs = @('setup') + $scopeArgs
 if ($NoBuild) { $setupArgs += '--no-build' }
 
 node $cli @setupArgs
@@ -33,7 +42,7 @@ if ($LASTEXITCODE -ne 0) {
 }
 
 if ($ImportFrom) {
-    $importArgs = @('import-profile', '--from', $ImportFrom)
+    $importArgs = @('import-profile', '--from', $ImportFrom) + $scopeArgs
     if ($ImportProfile) { $importArgs += @('--profile', $ImportProfile) }
     node $cli @importArgs
     if ($LASTEXITCODE -ne 0) {
@@ -42,6 +51,13 @@ if ($ImportFrom) {
 }
 
 Write-Host ''
-Write-Host 'Done. Open a new terminal, then try:' -ForegroundColor Green
-Write-Host '  ego-browser -e "console.log(await page.info())"'
-Write-Host '  node windows-local\src\ego-lite.mjs status'
+if ($Project) {
+    Write-Host 'Done. From that folder, try:' -ForegroundColor Green
+    Write-Host '  .ego\bin\ego-browser.cmd -e "console.log(await page.info())"'
+    Write-Host "  node `"$cli`" status --project `"$((Resolve-Path $Project).Path)`""
+}
+else {
+    Write-Host 'Done. Open a new terminal, then try:' -ForegroundColor Green
+    Write-Host '  ego-browser -e "console.log(await page.info())"'
+    Write-Host '  node windows-local\src\ego-lite.mjs status'
+}

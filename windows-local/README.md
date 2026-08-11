@@ -41,18 +41,65 @@ weaker on canvas-heavy apps and deeply nested iframes.
 
 ## Install
 
-From the repo root, in PowerShell:
+Two scopes. Pick per situation — they coexist happily.
+
+### Project-scoped (isolated, recommended)
+
+Everything stays inside one folder: its own browser profile, cookies, task
+spaces, CDP port, and agent skill. Your PATH is not modified and nothing is
+shared with other projects.
+
+```powershell
+powershell -ExecutionPolicy Bypass -File windows-local\install.ps1 -Project C:\path\to\your\project
+```
+
+Then, **from that folder**:
+
+```powershell
+.ego\bin\ego-browser.cmd task.js
+```
+
+Agents working in that folder discover the skill automatically (it is installed
+to `<project>\.claude\skills` and `<project>\.codex\skills`). `.ego/` is added to
+the project's `.gitignore` for you, since it holds a browser profile.
+
+The CDP port is derived from the folder path, so each project gets a stable port
+of its own and two projects never drive the same browser.
+
+### User-wide
+
+One install for every project: `ego-browser` on your PATH, skill in your home
+directory, one shared browser profile.
 
 ```powershell
 powershell -ExecutionPolicy Bypass -File windows-local\install.ps1
 ```
 
-That builds the runtime and host, writes `ego-browser` into
-`%USERPROFILE%\.local\bin`, adds that to your user PATH, copies the skill into
-`~/.claude/skills` and `~/.codex/skills`, and then proves the whole chain works
-by driving your real browser once.
-
 **Open a new terminal afterwards** so the PATH change applies.
+
+### What each scope touches
+
+|                           | project                                 | user-wide                                 |
+| ------------------------- | --------------------------------------- | ----------------------------------------- |
+| `ego-browser` command     | `<project>\.ego\bin\`                   | `%USERPROFILE%\.local\bin\`               |
+| your PATH                 | untouched                               | one entry added                           |
+| agent skill               | `<project>\.claude`, `<project>\.codex` | `~\.claude`, `~\.codex`                   |
+| browser profile + cookies | `<project>\.ego\state\profile`          | `%LOCALAPPDATA%\ego-windows-host\profile` |
+| task spaces               | per project                             | shared                                    |
+| CDP port                  | derived per folder (9530–9999)          | 9522                                      |
+
+Every command below takes `--project <dir>` to act on a project install instead
+of the user-wide one:
+
+```powershell
+node windows-local\src\ego-lite.mjs status        --project C:\path\to\project
+node windows-local\src\ego-lite.mjs import-profile --project C:\path\to\project --from edge
+node windows-local\src\ego-lite.mjs stop          --project C:\path\to\project
+powershell -File windows-local\uninstall.ps1      -Project C:\path\to\project
+```
+
+A project uninstall deletes only that folder's `.ego` and skill; the user-wide
+install and other projects are untouched.
 
 ### Carry your logins over
 
@@ -184,13 +231,14 @@ State on disk:
 
 ## Troubleshooting
 
-| Symptom                            | Fix                                                                   |
+| Installer seems to hang when you pipe its output to a file or another command | It has actually finished — check the log. The first run launches the browser detached, and a capturing wrapper can hold the pipe open. Run it without redirection. |
+| Symptom | Fix |
 | ---------------------------------- | --------------------------------------------------------------------- |
-| `ego-browser` not recognized       | open a new terminal; check `status`                                   |
-| Agents are logged out              | close the browser fully, re-run `import-profile`                      |
-| `no Chromium-based browser found`  | set `EGO_HOST_BROWSER_PATH`                                           |
-| Port already in use                | set `EGO_HOST_DEBUG_PORT` to something free                           |
-| Browser is in a weird state        | `stop`, then run anything again                                       |
+| `ego-browser` not recognized | open a new terminal; check `status` |
+| Agents are logged out | close the browser fully, re-run `import-profile` |
+| `no Chromium-based browser found` | set `EGO_HOST_BROWSER_PATH` |
+| Port already in use | set `EGO_HOST_DEBUG_PORT` to something free |
+| Browser is in a weird state | `stop`, then run anything again |
 | Snapshot is thin on a complex page | expected — use `page.screenshot()` and coordinates, or DOM `evaluate` |
 
 ## Removing it

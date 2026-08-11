@@ -8,7 +8,13 @@
 // the unmodified ego-browser runtime expects.
 
 import { execFileSync, spawnSync } from "node:child_process";
-import { existsSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
+import {
+  existsSync,
+  mkdirSync,
+  readFileSync,
+  rmSync,
+  writeFileSync,
+} from "node:fs";
 import { homedir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -31,10 +37,16 @@ const HOST_DIR = join(REPO_ROOT, "package", "ego-windows-host");
 const RUNTIME_DIR = join(REPO_ROOT, "package", "ego-browser");
 const SKILL_SOURCE = join(REPO_ROOT, "skills", "ego-browser");
 const HOST_ENTRY = join(HOST_DIR, "bin", "ego-windows-host.mjs");
-const SHIM_DIR = join(homedir(), ".local", "bin");
 const SHIM_NAME = "ego-browser";
 
 const HELP = `ego lite for Windows (personal build)
+
+Scope:
+  --project [dir]   install into one folder only (default: current directory).
+                    Everything lives in <dir>\\.ego: its own browser profile,
+                    task spaces, CDP port, and agent skill. Your PATH and your
+                    other projects are untouched.
+  (no flag)         user-wide install: PATH command + skills for every project.
 
 Usage:
   ego-lite setup                 build everything, install the ego-browser
@@ -51,13 +63,18 @@ Usage:
   ego-lite uninstall             remove the command, the skill, and all state
   ego-lite help                  this text
 
-After setup, these are equivalent:
+After a user-wide setup, these are equivalent:
   ego-browser task.js            (what your agents call)
   ego-lite run task.js
+
+After a project setup, the command is inside the project (no PATH change):
+  .ego\\bin\\ego-browser.cmd task.js
 `;
 
 function main(argv) {
-  const [command, ...rest] = argv;
+  const [command, ...rawRest] = argv;
+  const scope = resolveScope(rawRest);
+  const rest = stripScopeFlags(rawRest);
   switch (command) {
     case undefined:
     case "help":
@@ -66,21 +83,21 @@ function main(argv) {
       process.stdout.write(HELP);
       return 0;
     case "setup":
-      return setup(rest);
+      return setup(rest, scope);
     case "import-profile":
-      return runImportProfile(rest);
+      return runImportProfile(rest, scope);
     case "profiles":
       return showProfiles();
     case "run":
-      return runAgentScript(rest);
+      return runAgentScript(rest, scope);
     case "status":
-      return status();
+      return status(scope);
     case "stop":
-      return stop();
+      return stop({ scope });
     case "reset":
-      return reset(rest);
+      return reset(rest, scope);
     case "uninstall":
-      return uninstall();
+      return uninstall(scope);
     default:
       process.stderr.write(`unknown command: ${command}\n\n${HELP}`);
       return 2;
@@ -89,8 +106,14 @@ function main(argv) {
 
 // ---------------------------------------------------------------- setup
 
-function setup(args) {
+function setup(args, scope) {
   const skipBuild = args.includes("--no-build");
+  step(`Installing: ${scope.label}`);
+  if (scope.mode === "project") {
+    ok(`state and profile: ${scope.stateDir}`);
+    ok(`CDP port for this folder: ${scope.port}`);
+    note("Your PATH and other projects are not touched.");
+  }
   step("Checking Node.js");
   const major = Number(process.versions.node.split(".")[0]);
   if (major < 22) {
@@ -112,15 +135,21 @@ function setup(args) {
   }
 
   step(`Installing the ${SHIM_NAME} command`);
-  const shims = writeShims();
+  const shims = writeShims(scope);
   ok(`wrote ${shims.join(", ")}`);
-  const pathResult = ensureOnUserPath(SHIM_DIR);
-  ok(pathResult);
+  if (scope.mutatesPath) {
+    ok(ensureOnUserPath(scope.shimDir));
+  } else {
+    note("not added to PATH (project scope) — call it by its path");
+  }
 
   step("Installing the agent skill");
   const installed = installSkill({
     skillSource: SKILL_SOURCE,
-    hostCommand: SHIM_NAME,
+    hostCommand:
+      scope.mode === "project" ? ".ego\\bin\\ego-browser.cmd" : SHIM_NAME,
+    base: scope.skillBase,
+    onlyExistingAgents: scope.onlyExistingAgents,
   });
   for (const entry of installed) {
     ok(`${entry.agent}: ${entry.status} (${entry.path})`);
@@ -131,52 +160,121 @@ function setup(args) {
     );
   }
 
+  if (scope.mode === "project") {
+    step("Keeping .ego out of git");
+    ok(ignoreEgoDir(scope));
+  }
+
   step("Verifying the host end to end");
-  const probe = hostRun([
-    "-e",
-    "const t = await taskSpaces.useOrCreate('ego-lite setup check');" +
-      "await browser.openOrReuseTab('about:blank', { wait: false });" +
-      "const info = await page.info();" +
-      "console.log(JSON.stringify({ space: t.id, url: info.url }));" +
-      "await taskSpaces.complete(t.id, { keep: false });",
-  ]);
+  const probe = hostRun(
+    [
+      "-e",
+      "const t = await taskSpaces.useOrCreate('ego-lite setup check');" +
+        "await browser.openOrReuseTab('about:blank', { wait: false });" +
+        "const info = await page.info();" +
+        "console.log(JSON.stringify({ space: t.id, url: info.url }));" +
+        "await taskSpaces.complete(t.id, { keep: false });",
+    ],
+    "pipe",
+    scope,
+  );
   if (probe.status !== 0) {
     fail("the host could not drive the browser");
     return 1;
   }
   ok("browser, task space, and runtime all responded");
 
+  const command =
+    scope.mode === "project" ? ".ego\\bin\\ego-browser.cmd" : `${SHIM_NAME}`;
   process.stdout.write(
     [
       "",
       "Setup complete.",
       "",
-      `  ${SHIM_NAME} -e "console.log(await page.snapshot())"`,
+      `  ${command} -e "console.log(await page.snapshot())"`,
       "",
-      "Open a NEW terminal first so the updated PATH is picked up.",
+      ...(scope.mutatesPath
+        ? ["Open a NEW terminal first so the updated PATH is picked up."]
+        : [
+            `Run it from ${scope.projectDir} (agents working there find the skill automatically).`,
+          ]),
       "Next, carry your logins over so agents start signed in:",
       "",
-      "  ego-lite import-profile --from edge",
+      `  node ${relativeCliPath(scope)} import-profile --from edge${scope.mode === "project" ? ` --project "${scope.projectDir}"` : ""}`,
       "",
     ].join("\n"),
   );
   return 0;
 }
 
-function writeShims() {
-  mkdirSync(SHIM_DIR, { recursive: true });
-  const cmdPath = join(SHIM_DIR, `${SHIM_NAME}.cmd`);
-  const ps1Path = join(SHIM_DIR, `${SHIM_NAME}.ps1`);
-  // cmd shim: what agents invoke. "nodejs" is swallowed by the host so the
-  // documented `ego-browser nodejs ...` shape keeps working.
+function relativeCliPath(scope) {
+  return scope.mode === "project"
+    ? join(HERE, "ego-lite.mjs")
+    : "windows-local\\src\\ego-lite.mjs";
+}
+
+// A project install writes a browser profile and cookies into .ego; that must
+// never reach a commit.
+function ignoreEgoDir(scope) {
+  const gitignore = join(scope.projectDir, ".gitignore");
+  const entry = ".ego/";
+  let current = "";
+  if (existsSync(gitignore)) {
+    current = readFileSync(gitignore, "utf8");
+    if (
+      current
+        .split(/\r?\n/)
+        .some((line) => line.trim() === entry || line.trim() === ".ego")
+    ) {
+      return `${gitignore} already ignores .ego/`;
+    }
+  }
+  const prefix = current && !current.endsWith("\n") ? "\n" : "";
+  writeFileSync(
+    gitignore,
+    `${current}${prefix}\n# ego lite for Windows (local browser profile and state)\n${entry}\n`,
+    "utf8",
+  );
+  return `added ${entry} to ${gitignore}`;
+}
+
+function writeShims(scope) {
+  mkdirSync(scope.shimDir, { recursive: true });
+  const cmdPath = join(scope.shimDir, `${SHIM_NAME}.cmd`);
+  const ps1Path = join(scope.shimDir, `${SHIM_NAME}.ps1`);
+  // A project shim pins its own state directory and CDP port, so the isolation
+  // holds no matter which shell or agent invokes it — nothing has to remember to
+  // set environment variables. "nodejs" is swallowed by the host, so the
+  // documented `ego-browser nodejs ...` shape keeps working either way.
+  const scoped = scope.mode === "project";
   writeFileSync(
     cmdPath,
-    ["@echo off", `node "${HOST_ENTRY}" %*`, ""].join("\r\n"),
+    [
+      "@echo off",
+      ...(scoped
+        ? [
+            `set "EGO_HOST_STATE_DIR=${scope.stateDir}"`,
+            `set "EGO_HOST_DEBUG_PORT=${scope.port}"`,
+          ]
+        : []),
+      `node "${HOST_ENTRY}" %*`,
+      "",
+    ].join("\r\n"),
     "utf8",
   );
   writeFileSync(
     ps1Path,
-    ["#!/usr/bin/env pwsh", `node "${HOST_ENTRY}" @args`, ""].join("\r\n"),
+    [
+      "#!/usr/bin/env pwsh",
+      ...(scoped
+        ? [
+            `$env:EGO_HOST_STATE_DIR = '${scope.stateDir.replace(/'/g, "''")}'`,
+            `$env:EGO_HOST_DEBUG_PORT = '${scope.port}'`,
+          ]
+        : []),
+      `node "${HOST_ENTRY}" @args`,
+      "",
+    ].join("\r\n"),
     "utf8",
   );
   return [cmdPath, ps1Path];
@@ -221,7 +319,7 @@ function showProfiles() {
   return 0;
 }
 
-function runImportProfile(args) {
+function runImportProfile(args, scope) {
   const browser = flagValue(args, "--from") || defaultBrowser();
   if (!browser) {
     fail("no Edge or Chrome profile found to import from");
@@ -241,8 +339,8 @@ function runImportProfile(args) {
     return 1;
   }
 
-  const config = hostConfig();
   step(`Importing ${browser} profile ${JSON.stringify(profile)}`);
+  note(`into ${scope.label}: ${scope.userDataDir}`);
   note(
     "This copies cookies, saved logins, and local site storage into the hosted browser profile. Nothing in your real profile is modified.",
   );
@@ -251,7 +349,7 @@ function runImportProfile(args) {
     report = importProfile({
       browser,
       profile,
-      targetUserDataDir: config.userDataDir,
+      targetUserDataDir: scope.userDataDir,
       force: args.includes("--force"),
     });
   } catch (error) {
@@ -290,43 +388,48 @@ function defaultBrowser() {
 
 // ------------------------------------------------------------------ run
 
-function runAgentScript(args) {
+function runAgentScript(args, scope) {
   if (!args.length) {
     process.stderr.write("ego-lite run needs a script file or -e <code>\n");
     return 2;
   }
-  return hostRun(args, "inherit").status ?? 1;
+  return hostRun(args, "inherit", scope).status ?? 1;
 }
 
 // --------------------------------------------------------------- status
 
-function status() {
-  process.stdout.write("ego lite for Windows — status\n\n");
+function status(scope) {
+  process.stdout.write(`ego lite for Windows — status (${scope.label})\n\n`);
 
   const runtimeBuilt = existsSync(join(RUNTIME_DIR, "dist", "out", "index.js"));
   const hostBuilt = existsSync(join(HOST_DIR, "dist", "src", "cli.js"));
   line("runtime build", runtimeBuilt ? "ok" : "missing — run: ego-lite setup");
   line("host build", hostBuilt ? "ok" : "missing — run: ego-lite setup");
 
-  const shim = join(SHIM_DIR, `${SHIM_NAME}.cmd`);
+  const shim = join(scope.shimDir, `${SHIM_NAME}.cmd`);
   line(
     `${SHIM_NAME} command`,
     existsSync(shim) ? shim : "not installed — run: ego-lite setup",
   );
-  line(
-    "on PATH",
-    which(SHIM_NAME) || "not on this shell's PATH (open a new terminal)",
-  );
+  if (scope.mutatesPath) {
+    line(
+      "on PATH",
+      which(SHIM_NAME) || "not on this shell's PATH (open a new terminal)",
+    );
+  } else {
+    line("on PATH", "no (project scope, by design)");
+  }
+  line("CDP port", String(scope.port));
+  line("state dir", scope.stateDir);
 
-  for (const target of skillTargets()) {
+  for (const target of skillTargets(scope.skillBase)) {
     line(
       `skill (${target.agent})`,
       existsSync(target.path) ? target.path : "not installed",
     );
   }
 
-  const config = hostConfig();
-  const imported = existsSync(join(config.userDataDir, "Default", "Cookies"));
+  const imported = cookieDbPresent(scope.userDataDir);
   line(
     "imported logins",
     imported ? "present" : "none — run: ego-lite import-profile",
@@ -334,20 +437,27 @@ function status() {
 
   process.stdout.write("\n");
   if (hostBuilt) {
-    hostRun(["--doctor"], "inherit");
+    hostRun(["--doctor"], "inherit", scope);
   }
   return 0;
 }
 
+function cookieDbPresent(userDataDir) {
+  return [
+    join(userDataDir, "Default", "Network", "Cookies"),
+    join(userDataDir, "Default", "Cookies"),
+  ].some((path) => existsSync(path));
+}
+
 // ----------------------------------------------------------------- stop
 
-function stop({ quiet = false } = {}) {
-  const config = hostConfig();
+function stop({ quiet = false, scope } = {}) {
+  const target = scope || resolveScope([]);
   const result = spawnSync(
     process.execPath,
     [
       "-e",
-      `const port=${config.port};` +
+      `const port=${target.port};` +
         `const gone=()=>fetch('http://127.0.0.1:'+port+'/json/version').then(()=>false).catch(()=>true);` +
         `const wait=async()=>{for(let i=0;i<40;i++){if(await gone())return true;` +
         `await new Promise(r=>setTimeout(r,250))}return false};` +
@@ -404,13 +514,12 @@ function sleepSync(ms) {
 
 // ---------------------------------------------------------------- reset
 
-function reset(args) {
-  const config = hostConfig();
-  if (stop({ quiet: true }) !== 0) return 1;
-  rmSync(join(config.stateDir, "spaces.json"), { force: true });
-  process.stdout.write("task spaces cleared\n");
+function reset(args, scope) {
+  if (stop({ quiet: true, scope }) !== 0) return 1;
+  rmSync(join(scope.stateDir, "spaces.json"), { force: true });
+  process.stdout.write(`task spaces cleared (${scope.label})\n`);
   if (args.includes("--profile")) {
-    if (!removeDirWithRetry(config.userDataDir)) return 1;
+    if (!removeDirWithRetry(scope.userDataDir)) return 1;
     process.stdout.write(
       "hosted browser profile wiped (imported logins are gone)\n",
     );
@@ -420,48 +529,132 @@ function reset(args) {
 
 // ------------------------------------------------------------ uninstall
 
-function uninstall() {
-  if (stop({ quiet: true }) !== 0) return 1;
-  const config = hostConfig();
+function uninstall(scope) {
+  if (stop({ quiet: true, scope }) !== 0) return 1;
+  step(`Uninstalling: ${scope.label}`);
   step("Removing the agent skill");
-  for (const entry of uninstallSkill()) {
+  for (const entry of uninstallSkill(scope.skillBase)) {
     ok(`${entry.agent}: ${entry.status}`);
   }
   step(`Removing the ${SHIM_NAME} command`);
   for (const ext of ["cmd", "ps1"]) {
-    rmSync(join(SHIM_DIR, `${SHIM_NAME}.${ext}`), { force: true });
+    rmSync(join(scope.shimDir, `${SHIM_NAME}.${ext}`), { force: true });
   }
-  ok("shims removed (the PATH entry is harmless and left in place)");
-  step("Removing host state");
-  if (removeDirWithRetry(config.stateDir)) {
-    ok(`deleted ${config.stateDir}`);
-  }
-  note(
-    "This checkout is untouched. Delete the windows-local/ directory to remove the rest.",
+  ok(
+    scope.mutatesPath
+      ? "shims removed (the PATH entry is harmless and left in place)"
+      : "shims removed",
   );
+  step("Removing host state");
+  if (removeDirWithRetry(scope.stateDir)) {
+    ok(`deleted ${scope.stateDir}`);
+  }
+  if (scope.mode === "project") {
+    // .ego also holds the bin directory; drop the whole thing so the project
+    // returns to exactly how it was.
+    if (removeDirWithRetry(scope.egoDir)) {
+      ok(`deleted ${scope.egoDir}`);
+    }
+    note(
+      "The .gitignore entry is left in place; remove it by hand if you want.",
+    );
+  } else {
+    note(
+      "This checkout is untouched. Delete the windows-local/ directory to remove the rest.",
+    );
+  }
   return 0;
 }
 
 // --------------------------------------------------------------- helpers
 
-function hostConfig() {
-  const stateDir =
-    process.env.EGO_HOST_STATE_DIR ||
-    join(
-      process.env.LOCALAPPDATA || join(homedir(), ".local", "share"),
-      "ego-windows-host",
-    );
+/**
+ * Where this invocation installs to and keeps state.
+ *
+ * user scope    — PATH command, skills in the home directory, one shared
+ *                 browser profile: convenient, but global.
+ * project scope — everything under <dir>/.ego, including its own browser
+ *                 profile and CDP port, so two projects never share cookies,
+ *                 task spaces, or a browser window.
+ */
+function resolveScope(args) {
+  const index = args.findIndex((arg) => arg === "--project");
+  if (index < 0) {
+    const stateDir =
+      process.env.EGO_HOST_STATE_DIR ||
+      join(
+        process.env.LOCALAPPDATA || join(homedir(), ".local", "share"),
+        "ego-windows-host",
+      );
+    return {
+      mode: "user",
+      label: "user-wide",
+      stateDir,
+      userDataDir: join(stateDir, "profile"),
+      port: Number(process.env.EGO_HOST_DEBUG_PORT) || 9522,
+      shimDir: join(homedir(), ".local", "bin"),
+      skillBase: homedir(),
+      onlyExistingAgents: true,
+      mutatesPath: true,
+    };
+  }
+  const candidate = args[index + 1];
+  const projectDir = resolve(
+    candidate && !candidate.startsWith("--") ? candidate : process.cwd(),
+  );
+  const egoDir = join(projectDir, ".ego");
+  const stateDir = join(egoDir, "state");
   return {
+    mode: "project",
+    label: `project ${projectDir}`,
+    projectDir,
+    egoDir,
     stateDir,
     userDataDir: join(stateDir, "profile"),
-    port: Number(process.env.EGO_HOST_DEBUG_PORT) || 9522,
+    // Derived from the path so the same folder always gets the same port, and
+    // two different folders almost never collide.
+    port: projectPort(projectDir),
+    shimDir: join(egoDir, "bin"),
+    skillBase: projectDir,
+    onlyExistingAgents: false,
+    mutatesPath: false,
   };
 }
 
-function hostRun(args, stdio = "pipe") {
+// Stable per-folder port in the 9530-9999 range (9522 stays the user-wide one).
+function projectPort(projectDir) {
+  const key = projectDir.toLowerCase();
+  let hash = 0;
+  for (let i = 0; i < key.length; i += 1) {
+    hash = (hash * 31 + key.charCodeAt(i)) % 470;
+  }
+  return 9530 + hash;
+}
+
+function stripScopeFlags(args) {
+  const out = [];
+  for (let i = 0; i < args.length; i += 1) {
+    if (args[i] === "--project") {
+      const next = args[i + 1];
+      if (next && !next.startsWith("--")) i += 1;
+      continue;
+    }
+    out.push(args[i]);
+  }
+  return out;
+}
+
+function hostRun(args, stdio = "pipe", scope = null) {
   const result = spawnSync(process.execPath, [HOST_ENTRY, ...args], {
     stdio,
     encoding: "utf8",
+    env: scope
+      ? {
+          ...process.env,
+          EGO_HOST_STATE_DIR: scope.stateDir,
+          EGO_HOST_DEBUG_PORT: String(scope.port),
+        }
+      : process.env,
   });
   if (stdio === "pipe") {
     if (result.stdout) process.stdout.write(result.stdout);
