@@ -341,39 +341,76 @@ function status() {
 
 // ----------------------------------------------------------------- stop
 
-function stop() {
+function stop({ quiet = false } = {}) {
   const config = hostConfig();
   const result = spawnSync(
     process.execPath,
     [
       "-e",
-      `fetch('http://127.0.0.1:${config.port}/json/version')` +
-        `.then(r=>r.json()).then(v=>{const ws=new WebSocket(v.webSocketDebuggerUrl);` +
+      `const port=${config.port};` +
+        `const gone=()=>fetch('http://127.0.0.1:'+port+'/json/version').then(()=>false).catch(()=>true);` +
+        `const wait=async()=>{for(let i=0;i<40;i++){if(await gone())return true;` +
+        `await new Promise(r=>setTimeout(r,250))}return false};` +
+        `fetch('http://127.0.0.1:'+port+'/json/version').then(r=>r.json()).then(v=>{` +
+        `const ws=new WebSocket(v.webSocketDebuggerUrl);` +
         `ws.addEventListener('open',()=>{ws.send(JSON.stringify({id:1,method:'Browser.close'}));` +
-        `setTimeout(()=>process.exit(0),700)})}).catch(()=>process.exit(3))`,
+        // Wait for the endpoint to actually disappear: Windows releases the
+        // profile's file handles only once the process is really gone, and
+        // deleting the state directory before that fails with EPERM.
+        `wait().then(ok=>process.exit(ok?0:4))})}).catch(()=>process.exit(3))`,
     ],
     { encoding: "utf8" },
   );
   if (result.status === 3) {
-    process.stdout.write("no hosted browser is running\n");
+    if (!quiet) process.stdout.write("no hosted browser is running\n");
     return 0;
   }
-  process.stdout.write(
-    "hosted browser closed; task spaces and logins are preserved\n",
-  );
+  if (result.status === 4) {
+    process.stderr.write(
+      "the hosted browser did not shut down; close it manually and retry\n",
+    );
+    return 1;
+  }
+  if (!quiet) {
+    process.stdout.write(
+      "hosted browser closed; task spaces and logins are preserved\n",
+    );
+  }
   return 0;
+}
+
+// Windows can hold a directory briefly after the owning process exits, so a
+// single rm can fail with EPERM/EBUSY even though nothing is really using it.
+function removeDirWithRetry(dir, attempts = 12) {
+  for (let attempt = 1; attempt <= attempts; attempt += 1) {
+    try {
+      rmSync(dir, { recursive: true, force: true });
+      return true;
+    } catch (error) {
+      if (attempt === attempts) {
+        fail(`could not delete ${dir}: ${error.code || error.message}`);
+        return false;
+      }
+      sleepSync(250);
+    }
+  }
+  return false;
+}
+
+function sleepSync(ms) {
+  // Blocking wait without extra dependencies; used only in teardown paths.
+  Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
 }
 
 // ---------------------------------------------------------------- reset
 
 function reset(args) {
   const config = hostConfig();
-  stop();
-  const spaces = join(config.stateDir, "spaces.json");
-  rmSync(spaces, { force: true });
+  if (stop({ quiet: true }) !== 0) return 1;
+  rmSync(join(config.stateDir, "spaces.json"), { force: true });
   process.stdout.write("task spaces cleared\n");
   if (args.includes("--profile")) {
-    rmSync(config.userDataDir, { recursive: true, force: true });
+    if (!removeDirWithRetry(config.userDataDir)) return 1;
     process.stdout.write(
       "hosted browser profile wiped (imported logins are gone)\n",
     );
@@ -384,7 +421,7 @@ function reset(args) {
 // ------------------------------------------------------------ uninstall
 
 function uninstall() {
-  stop();
+  if (stop({ quiet: true }) !== 0) return 1;
   const config = hostConfig();
   step("Removing the agent skill");
   for (const entry of uninstallSkill()) {
@@ -396,8 +433,9 @@ function uninstall() {
   }
   ok("shims removed (the PATH entry is harmless and left in place)");
   step("Removing host state");
-  rmSync(config.stateDir, { recursive: true, force: true });
-  ok(`deleted ${config.stateDir}`);
+  if (removeDirWithRetry(config.stateDir)) {
+    ok(`deleted ${config.stateDir}`);
+  }
   note(
     "This checkout is untouched. Delete the windows-local/ directory to remove the rest.",
   );
