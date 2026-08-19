@@ -30,7 +30,7 @@ import {
   skillTargets,
   uninstallSkill,
 } from "./skill-install.mjs";
-import { resolveScope, stripScopeFlags } from "./scope.mjs";
+import { resolveScope, stripScopeFlags, userScope } from "./scope.mjs";
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const REPO_ROOT = resolve(HERE, "..", "..");
@@ -52,6 +52,8 @@ Scope:
 Usage:
   ego-lite setup                 build everything, install the ego-browser
                                  command and the agent skill, verify it works
+                                 (--browser edge|chrome pins which browser to
+                                  host; must match the profile you import)
   ego-lite import-profile        copy your real Edge/Chrome logins into the
                                  host profile  (--from edge|chrome --profile "Default")
   ego-lite profiles              list importable browser profiles
@@ -135,8 +137,20 @@ function setup(args, scope) {
     ok("host built");
   }
 
+  const browserName = flagValue(args, "--browser");
+  let browserPath = null;
+  if (browserName) {
+    try {
+      browserPath = browserExecutable(browserName);
+    } catch (error) {
+      fail(error.message);
+      return 1;
+    }
+    ok(`hosting ${browserName}: ${browserPath}`);
+  }
+
   step(`Installing the ${SHIM_NAME} command`);
-  const shims = writeShims(scope);
+  const shims = writeShims(scope, browserPath);
   ok(`wrote ${shims.join(", ")}`);
   if (scope.mutatesPath) {
     ok(ensureOnUserPath(scope.shimDir));
@@ -178,6 +192,7 @@ function setup(args, scope) {
     ],
     "pipe",
     scope,
+    browserPath,
   );
   if (probe.status !== 0) {
     fail("the host could not drive the browser");
@@ -239,7 +254,36 @@ function ignoreEgoDir(scope) {
   return `added ${entry} to ${gitignore}`;
 }
 
-function writeShims(scope) {
+// Standard install roots per browser family. Built with join() so there are no
+// backslash-escaping traps in the source.
+const BROWSER_EXES = { edge: "msedge.exe", chrome: "chrome.exe" };
+const BROWSER_VENDOR_DIR = {
+  edge: ["Microsoft", "Edge", "Application"],
+  chrome: ["Google", "Chrome", "Application"],
+};
+/** Resolve a --browser name to an installed executable. */
+function browserExecutable(name) {
+  const exe = BROWSER_EXES[name];
+  if (!exe) {
+    throw new Error(
+      `unknown --browser ${JSON.stringify(name)}; expected edge or chrome`,
+    );
+  }
+  const roots = [
+    process.env.PROGRAMFILES,
+    process.env["PROGRAMFILES(X86)"],
+    process.env.LOCALAPPDATA,
+  ].filter(Boolean);
+  for (const root of roots) {
+    const candidate = join(root, ...BROWSER_VENDOR_DIR[name], exe);
+    if (existsSync(candidate)) {
+      return candidate;
+    }
+  }
+  throw new Error(`${name} is not installed at a standard location`);
+}
+
+function writeShims(scope, browserPath) {
   mkdirSync(scope.shimDir, { recursive: true });
   const cmdPath = join(scope.shimDir, `${SHIM_NAME}.cmd`);
   const ps1Path = join(scope.shimDir, `${SHIM_NAME}.ps1`);
@@ -258,6 +302,7 @@ function writeShims(scope) {
             `set "EGO_HOST_DEBUG_PORT=${scope.port}"`,
           ]
         : []),
+      ...(browserPath ? [`set "EGO_HOST_BROWSER_PATH=${browserPath}"`] : []),
       `node "${HOST_ENTRY}" %*`,
       "",
     ].join("\r\n"),
@@ -272,6 +317,9 @@ function writeShims(scope) {
             `$env:EGO_HOST_STATE_DIR = '${scope.stateDir.replace(/'/g, "''")}'`,
             `$env:EGO_HOST_DEBUG_PORT = '${scope.port}'`,
           ]
+        : []),
+      ...(browserPath
+        ? [`$env:EGO_HOST_BROWSER_PATH = '${browserPath.replace(/'/g, "''")}'`]
         : []),
       `node "${HOST_ENTRY}" @args`,
       "",
@@ -569,17 +617,20 @@ function uninstall(scope) {
 
 // --------------------------------------------------------------- helpers
 
-function hostRun(args, stdio = "pipe", scope = null) {
+function hostRun(args, stdio = "pipe", scope = null, browserPath = null) {
   const result = spawnSync(process.execPath, [HOST_ENTRY, ...args], {
     stdio,
     encoding: "utf8",
-    env: scope
-      ? {
-          ...process.env,
-          EGO_HOST_STATE_DIR: scope.stateDir,
-          EGO_HOST_DEBUG_PORT: String(scope.port),
-        }
-      : process.env,
+    env: {
+      ...process.env,
+      ...(scope
+        ? {
+            EGO_HOST_STATE_DIR: scope.stateDir,
+            EGO_HOST_DEBUG_PORT: String(scope.port),
+          }
+        : {}),
+      ...(browserPath ? { EGO_HOST_BROWSER_PATH: browserPath } : {}),
+    },
   });
   if (stdio === "pipe") {
     if (result.stdout) process.stdout.write(result.stdout);

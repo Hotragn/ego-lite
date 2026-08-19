@@ -13,7 +13,7 @@
 
 import { execFileSync } from "node:child_process";
 import {
-  cpSync,
+  copyFileSync,
   existsSync,
   mkdirSync,
   readFileSync,
@@ -118,25 +118,65 @@ function readProfileName(profileDir) {
   }
 }
 
-/** Whether the source browser is currently running (its files would be locked). */
-export function isBrowserRunning(browser) {
+/**
+ * Whether the *user's own* copy of the source browser is running, in which case
+ * its cookie database is locked and a copy may come out torn.
+ *
+ * The host runs the same executable (Edge is usually both), so a bare process
+ * name check always says "running" once the host is up. Command lines separate
+ * them: the host's process carries its own --user-data-dir, which the caller
+ * passes as excludeUserDataDir.
+ */
+export function isBrowserRunning(browser, { excludeUserDataDir } = {}) {
   const spec = BROWSERS[browser];
   if (!spec) return false;
   for (const name of spec.processNames) {
-    try {
-      const out = execFileSync(
-        "tasklist.exe",
-        ["/FI", `IMAGENAME eq ${name}.exe`, "/NH"],
-        { encoding: "utf8" },
-      );
-      if (out.toLowerCase().includes(`${name}.exe`)) {
-        return true;
-      }
-    } catch {
-      // tasklist unavailable — fall through and let the copy attempt report.
+    const lines = processCommandLines(`${name}.exe`);
+    if (lines === null) {
+      // Could not read command lines; fall back to the conservative check.
+      if (processExists(`${name}.exe`)) return true;
+      continue;
     }
+    const needle = (excludeUserDataDir || "").toLowerCase();
+    const foreign = lines.filter(
+      (line) => !needle || !line.toLowerCase().includes(needle),
+    );
+    if (foreign.length > 0) return true;
   }
   return false;
+}
+
+function processCommandLines(imageName) {
+  try {
+    const out = execFileSync(
+      "powershell.exe",
+      [
+        "-NoProfile",
+        "-NonInteractive",
+        "-Command",
+        `Get-CimInstance Win32_Process -Filter "Name='${imageName}'" | ForEach-Object { $_.CommandLine }`,
+      ],
+      { encoding: "utf8" },
+    );
+    return out.split(/\r?\n/).filter((line) => line.trim() !== "");
+  } catch {
+    return null;
+  }
+}
+
+function processExists(imageName) {
+  try {
+    const out = execFileSync(
+      "tasklist.exe",
+      ["/FI", `IMAGENAME eq ${imageName}`, "/NH"],
+      {
+        encoding: "utf8",
+      },
+    );
+    return out.toLowerCase().includes(imageName.toLowerCase());
+  } catch {
+    return false;
+  }
 }
 
 /**
@@ -154,7 +194,10 @@ export function importProfile({
   if (!spec) {
     throw new Error(`unknown browser ${JSON.stringify(browser)}`);
   }
-  if (!force && isBrowserRunning(browser)) {
+  if (
+    !force &&
+    isBrowserRunning(browser, { excludeUserDataDir: targetUserDataDir })
+  ) {
     throw new Error(
       `${spec.label} is running. Close it completely and retry, or pass --force to copy anyway (cookies may be incomplete).`,
     );
@@ -179,7 +222,7 @@ export function importProfile({
 
   // Local State carries the DPAPI-wrapped encryption key; without it the copied
   // Cookies and Login Data are unreadable ciphertext.
-  cpSync(localState, join(targetUserDataDir, "Local State"), { force: true });
+  copyFileSync(localState, join(targetUserDataDir, "Local State"));
   copied.push("Local State");
 
   for (const entry of PROFILE_ENTRIES) {
@@ -222,7 +265,7 @@ function copyEntry(from, to, label, copied, skipped) {
   }
   if (!isDirectory) {
     try {
-      cpSync(from, to, { force: true });
+      copyFileSync(from, to);
       copied.push(label);
     } catch (error) {
       skipped.push(`${label} (${error.code || error.message})`);

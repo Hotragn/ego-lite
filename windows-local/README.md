@@ -101,6 +101,21 @@ powershell -File windows-local\uninstall.ps1      -Project C:\path\to\project
 A project uninstall deletes only that folder's `.ego` and skill; the user-wide
 install and other projects are untouched.
 
+### Match the hosted browser to the profile you import
+
+Chromium 127+ protects cookies with App-Bound Encryption, which ties the key to
+the _application_. Cookies copied out of Chrome can therefore only be read by
+Chrome, and Edge cookies only by Edge. Pin the host to the family you import
+from:
+
+```powershell
+node windows-local\src\ego-lite.mjs setup --no-build --browser chrome
+node windows-local\src\ego-lite.mjs import-profile --from chrome --profile Default
+```
+
+`--browser` is written into the `ego-browser` shim, so every later call keeps
+using it. Verify with `ego-browser --doctor` (the first line names the executable).
+
 ### Carry your logins over
 
 This is the step that makes agents useful — without it the hosted browser is
@@ -115,9 +130,22 @@ node windows-local\src\ego-lite.mjs import-profile --from edge
 ```
 
 It copies cookies, saved logins, and local site storage into the hosted
-browser's own profile. **Your real profile is only read, never modified.** If the
-cookie database is locked, the command tells you so and fails rather than
-leaving you with a profile that looks imported but is logged out.
+browser's own profile. Pick a profile that is **actually signed in** to the sites
+you care about — a profile that was signed out keeps its cookie rows but the
+session cookie is gone, so the hosted browser lands logged out. Confirm with:
+
+```powershell
+ego-browser -e "const c = await cdp('Network.getAllCookies', {}); console.log(c.cookies.filter(x => x.domain.includes('github.com')).map(x => x.name))"
+```
+
+Alternatively, skip importing and sign in **once inside the hosted browser** —
+its profile is persistent, so the session survives every later run. Use
+`taskSpaces.handOff(name)` to hand the window over, sign in yourself, then
+`taskSpaces.takeOver(name)`.
+
+**Your real profile is only read, never modified.** If its cookie database is
+locked by a running browser, the import says so and stops rather than leaving you
+with a profile that looks imported but is signed out.
 
 Pick a specific profile with `--profile "Profile 1"`; list what is available:
 
