@@ -138,9 +138,13 @@ export function isBrowserRunning(browser, { excludeUserDataDir } = {}) {
       continue;
     }
     const needle = (excludeUserDataDir || "").toLowerCase();
-    const foreign = lines.filter(
-      (line) => !needle || !line.toLowerCase().includes(needle),
-    );
+    const foreign = lines.filter((line) => {
+      // Chromium child processes (renderer, gpu, utility) carry --type= and do
+      // not always repeat --user-data-dir, so they would look like a foreign
+      // browser. Only the browser process, which has no --type=, is decisive.
+      if (/--type=/.test(line)) return false;
+      return !needle || !line.toLowerCase().includes(needle);
+    });
     if (foreign.length > 0) return true;
   }
   return false;

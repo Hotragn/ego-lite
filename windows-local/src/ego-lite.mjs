@@ -354,7 +354,7 @@ function showProfiles() {
     if (!profiles.length) continue;
     found = true;
     process.stdout.write(
-      `${browser}${isBrowserRunning(browser) ? "  (running — close it before importing)" : ""}\n`,
+      `${browser}${isBrowserRunning(browser, { excludeUserDataDir: userScope().userDataDir }) ? "  (running — close it before importing)" : ""}\n`,
     );
     for (const profile of profiles) {
       const label = profile.displayName ? ` "${profile.displayName}"` : "";
