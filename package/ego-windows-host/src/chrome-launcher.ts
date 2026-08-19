@@ -4,6 +4,11 @@ import { join } from "node:path";
 
 const READY_TIMEOUT_MS = 20000;
 const POLL_INTERVAL_MS = 250;
+// Chromium's own default window is small enough that responsive sites collapse
+// their controls: Wikipedia replaces its search field with a toggle button and
+// leaves a 0x0 unfocusable input behind, so fill() silently writes nothing. A
+// desktop-sized window keeps agent scripts on the layout desktop users see.
+const DEFAULT_WINDOW = { width: 1440, height: 960 };
 
 type EndpointInfo = {
   webSocketDebuggerUrl: string;
@@ -21,6 +26,7 @@ type EnsureBrowserOptions = {
   sleep?: (ms: number) => Promise<void>;
   timeoutMs?: number;
   exists?: (path: string) => boolean;
+  windowSize?: { width: number; height: number };
 };
 
 /**
@@ -60,12 +66,14 @@ export async function ensureBrowser(options: EnsureBrowserOptions) {
     return { endpoint: existing, launched: false };
   }
   const browserPath = options.browserPath();
+  const windowSize = options.windowSize ?? DEFAULT_WINDOW;
   mkdirSync(options.userDataDir, { recursive: true });
   const args = [
     `--remote-debugging-port=${options.port}`,
     `--user-data-dir=${options.userDataDir}`,
     "--no-first-run",
     "--no-default-browser-check",
+    `--window-size=${windowSize.width},${windowSize.height}`,
     ...(options.headless ? ["--headless=new"] : []),
     "about:blank",
   ];

@@ -90,6 +90,10 @@ test("ensureBrowser launches detached with the CDP and profile flags", async () 
     assert.ok(record.args.includes("--remote-debugging-port=9522"));
     assert.ok(record.args.includes(`--user-data-dir=${userDataDir}`));
     assert.ok(record.args.includes("--no-first-run"));
+    assert.ok(
+      record.args.includes("--window-size=1440,960"),
+      "launches at a desktop size so responsive sites do not collapse controls",
+    );
     assert.equal(record.options.detached, true);
     assert.ok(existsSync(userDataDir), "creates the profile directory");
   } finally {
@@ -167,6 +171,33 @@ test("a locked profile is called out as the likely cause", async () => {
       }),
       /looks locked by another browser process/,
     );
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test("a caller can override the default window size", async () => {
+  const dir = await mkdtemp(join(tmpdir(), "ego-host-launch-"));
+  try {
+    const record = {};
+    let alive = false;
+    await ensureBrowser({
+      port: 9522,
+      userDataDir: join(dir, "profile"),
+      browserPath: () => "C:\fake\msedge.exe",
+      windowSize: { width: 800, height: 600 },
+      spawnFn: (command, args, options) => {
+        const child = fakeSpawn(record)(command, args, options);
+        alive = true;
+        return child;
+      },
+      fetchFn: async () => {
+        if (!alive) throw new Error("ECONNREFUSED");
+        return { ok: true, json: async () => ENDPOINT };
+      },
+      sleep: async () => {},
+    });
+    assert.ok(record.args.includes("--window-size=800,600"));
   } finally {
     await rm(dir, { recursive: true, force: true });
   }
