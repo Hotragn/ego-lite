@@ -15,6 +15,13 @@ const outputPath = join(
 );
 const expected = await format(publicApiMarkdown(), { parser: "markdown" });
 
+// The generator always writes LF, but a checkout can legitimately hold CRLF —
+// Git for Windows converts on checkout by default (core.autocrlf=true). Compare
+// content only, so the check reports real drift instead of the platform's line
+// endings, which no amount of regenerating would fix.
+const sameContent = (a, b) =>
+  a.replace(/\r\n/g, "\n") === b.replace(/\r\n/g, "\n");
+
 if (process.argv.includes("--check")) {
   let actual = "";
   try {
@@ -22,7 +29,7 @@ if (process.argv.includes("--check")) {
   } catch (error) {
     if (error?.code !== "ENOENT") throw error;
   }
-  if (actual !== expected) {
+  if (!sameContent(actual, expected)) {
     throw new Error(
       "skills/ego-browser/references/api.md is stale; run npm run generate:api-docs",
     );
