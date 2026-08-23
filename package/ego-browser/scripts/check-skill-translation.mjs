@@ -19,8 +19,14 @@ try {
   throw error;
 }
 
-const canonical = await readFile(canonicalPath);
-const actual = createHash("sha256").update(canonical).digest("hex");
+// Hash the LF form rather than the bytes on disk: Git for Windows checks the
+// canonical Skill out as CRLF by default, which would otherwise produce a
+// different digest than the one recorded on a LF checkout and fail this gate
+// for a file nobody edited.
+const canonical = await readFile(canonicalPath, "utf8");
+const actual = createHash("sha256")
+  .update(canonical.replace(/\r\n/g, "\n"), "utf8")
+  .digest("hex");
 const expected = translation.match(
   /<!-- source-skill-sha256: ([a-f0-9]{64}) -->/,
 )?.[1];
