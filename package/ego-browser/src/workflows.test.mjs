@@ -6,10 +6,13 @@ import { join } from "node:path";
 import { spawnSync } from "node:child_process";
 
 function workflow(name) {
+  // The patterns below match on "\n" explicitly, so normalize first: Git for
+  // Windows checks these files out as CRLF by default and the guards would
+  // otherwise read as absent on a checkout nobody edited.
   return readFileSync(
     new URL(`../../../.github/workflows/${name}.yml`, import.meta.url),
     "utf8",
-  );
+  ).replaceAll("\r\n", "\n");
 }
 
 function releaseGuards(github) {
